@@ -48,16 +48,22 @@ class EventBus:
 | イベント | 発行元 | 購読先 | データ |
 |---------|--------|--------|--------|
 | audio.input | WebSocketServer | ListenerWorker | 音声チャンクバイナリ |
-| vad.speech_start | ListenerWorker | ConversationState | - |
-| vad.speech_end | ListenerWorker | STTWorker, ConversationState | 音声バッファ |
+| vad.speech_start | ListenerWorker | ConversationManager | - |
+| vad.pause | ListenerWorker | STTWorker | 発話中の短い間（300-500ms）を検出 |
+| vad.speech_end | ListenerWorker | STTWorker, ConversationManager | 音声バッファ |
 | stt.partial | STTWorker | WebSocketServer | 中間テキスト |
-| stt.final | STTWorker | LLMWorker, MemoryWorker | 確定テキスト |
+| stt.clause | STTWorker | LLMWorker, MemoryWorker | 節区切りテキスト |
+| stt.final | STTWorker | LLMWorker, MemoryWorker, ConversationManager | 確定テキスト |
 | llm.response_chunk | LLMWorker | TTSWorker, WebSocketServer | テキストチャンク |
-| llm.response_done | LLMWorker | MemoryWorker, WebSocketServer | 完全テキスト |
+| llm.response_done | LLMWorker | MemoryWorker, WebSocketServer, ConversationManager | 完全テキスト |
 | llm.expression | LLMWorker | WebSocketServer | 感情パラメータ |
 | llm.animation | LLMWorker | WebSocketServer | アニメーション指示 |
 | tts.audio_chunk | TTSWorker | WebSocketServer | 音声チャンク |
-| vision.observation | VisionWorker | LLMWorker | 環境認識テキスト |
+| tts.stop | ConversationManager | TTSWorker, WebSocketServer | 音声再生の即時停止 |
+| perception.update | 各センサーWorker | PerceptionManager | PerceptionEntry |
+| perception.trigger | PerceptionManager | ConversationManager | 閾値超えの知覚イベント |
+| turn.interrupt | ConversationManager | LLMWorker, TTSWorker | 現在の応答を中断 |
+| turn.cancel | LLMWorker | TTSWorker | LLM応答ストリームの停止 |
 | memory.context | MemoryWorker | LLMWorker | RAG検索結果 |
 
 ---
@@ -96,15 +102,23 @@ class BaseWorker:
 
 **状態遷移:**
 ```
-待機中 ──(音声検出)──► 発話中 ──(無音検出)──► 発話終了
-  ▲                                              │
-  └──────────────────────────────────────────────┘
+待機中 ──(音声検出)──► 発話中 ──(短い間)──► pause検出 ──(再開)──► 発話中
+  ▲                      │                                        │
+  │                      └──(長い無音)──► 発話終了 ◄──(長い無音)────┘
+  └────────────────────────────────────────┘
 ```
+
+発行するイベント:
+- `vad.speech_start` - 発話開始検出
+- `vad.pause` - 発話中の短い間（300-500ms）検出。節区切り検出の補助
+- `vad.speech_end` - 発話終了検出（長い無音）
 
 **パラメータ（config設定可能）:**
 - `vad_threshold`: 発話判定の閾値
 - `silence_duration_ms`: 発話終了と判定する無音時間
+- `pause_duration_ms`: pause判定の無音時間（300-500ms）
 - `min_speech_duration_ms`: 最短発話時間（ノイズ除去）
+- `interrupt_grace_ms`: 割り込み判定の猶予時間（デフォルト300ms）
 
 ---
 
@@ -115,7 +129,18 @@ class BaseWorker:
 **責務:**
 - 音声バッファ受信→テキスト変換
 - 中間結果の逐次出力（ストリーミングSTT対応時）
+- 節区切り検出（`stt.clause` 発行）
 - 確定結果の出力
+
+**発行するイベント:**
+- `stt.partial` - 中間テキスト（ストリーミングSTT対応時のみ）
+- `stt.clause` - 節区切りテキスト（句読点検出 or vad.pause受信時）
+- `stt.final` - 確定テキスト
+
+**節区切り検出条件（STT/VAD併用、実装時にチューニング）:**
+- STT中間結果に句読点（。、？！）が出現
+- vad.pause を受信（STT中間結果が更新されない短い間）
+- STT中間結果のテキスト長が前回送信時から一定量増加
 
 **使用ライブラリ候補:**
 - OpenAI Whisper API（クラウド、高精度）
@@ -127,21 +152,32 @@ class BaseWorker:
 ### 6. LLMWorker
 
 LLMへのリクエストとストリーミング応答の管理。リアルタイム会話の核心。
+2つの処理モード（リアクション判定 / 本応答生成）を持つ。
 
 **責務:**
-- コンテキスト構築（人格 + 記憶 + 視覚情報 + ユーザー発話）
+- コンテキスト構築（人格 + 記憶 + 知覚 + ユーザー発話）
 - LLMへのストリーミングリクエスト
 - 応答のパース（テキスト、感情、アニメーション指示の分離）
 - 「応答すべきか」の判断制御
+- リアクション判定（相槌・表情、LLM APIは叩かない）
 
-**コンテキスト構築:**
+**2つの処理モード:**
+
+| モード | トリガー | LLM API | 目的 |
+|--------|---------|---------|------|
+| リアクション判定 | stt.clause | 叩かない | 相槌・表情（ルールベース等） |
+| 本応答生成 | stt.final | ストリーミングリクエスト | フル応答の生成 |
+
+**コンテキスト構築（本応答時）:**
 ```
-システムプロンプト（personality.yaml）
-+ RAG検索結果（MemoryWorkerから）
-+ 視覚認識結果（VisionWorkerから）
-+ 直近の会話履歴
-+ ユーザー発話テキスト
+① システムプロンプト（personality.yaml）     ← 必ず含める
+② Adapter Capabilities（connection.hello）  ← 必ず含める
+③ Perception Snapshot（PerceptionManager）  ← ttl内のもの
+④ RAG検索結果（MemoryWorker、先行検索済み）   ← 関連度でフィルタ
+⑤ 直近の会話履歴                             ← 圧縮対象
+⑥ ユーザー発話テキスト（stt.final）           ← 必ず含める
 ```
+トークン不足時は⑤→④→③の順に削減する。詳細は `llm-conversation-design.md` を参照。
 
 **応答フォーマット（LLMに要求する出力形式）:**
 ```json
@@ -158,6 +194,8 @@ actionの値:
 - `respond` - 応答する
 - `wait` - まだ聞いている（応答しない）
 - `think` - 考え中（短い応答の後、詳しく考える）
+- `backchannel` - 相槌・表情のみ（リアクション判定パスで使用）
+- `interrupt` - アバターが口を挟む（稀なケース）
 
 **使用ライブラリ候補:**
 - OpenAI API（GPT-4o等）
@@ -200,9 +238,72 @@ actionの値:
 - 定期認識: 一定間隔で映像を分析
 - イベント駆動: 大きな変化を検出した時のみ分析
 
+認識結果は `perception.update` イベントでPerceptionManagerに登録する。
+
 ---
 
-### 9. MemoryWorker
+### 9. ConversationManager
+
+会話の状態管理とイベント優先度判断を専任するコンポーネント。
+
+**責務:**
+- 会話状態マシンの管理（IDLE / LISTENING / PROCESSING / SPEAKING / INTERRUPTED）
+- イベント優先度に基づく処理判断
+- 割り込み制御（猶予付き中断: 300ms）
+- 知覚トリガーによる能動発話の許可/却下判断
+
+**購読するイベント:**
+- `vad.speech_start` - ユーザー発話開始（割り込み判定を含む）
+- `vad.speech_end` - ユーザー発話終了
+- `stt.final` - 確定テキスト（状態遷移用）
+- `llm.response_done` - LLM応答完了（状態遷移用）
+- `tts.audio_chunk` (is_final=true) - TTS再生完了（状態遷移用）
+- `perception.trigger` - 知覚トリガー（能動発話判定）
+
+**発行するイベント:**
+- `turn.interrupt` - 現在の応答を中断
+- `tts.stop` - 音声再生の即時停止
+
+詳細は `llm-conversation-design.md` を参照。
+
+---
+
+### 10. PerceptionManager
+
+全センサーの最新状態を集約・保持するコンポーネント。
+
+**責務:**
+- 各センサーWorkerからの知覚情報を受信・保持
+- TTL（有効期限）による古い知覚の自動無効化
+- LLMWorkerへの最新知覚スナップショット提供
+- 閾値超え検出による `perception.trigger` 発行
+
+**インターフェース:**
+```python
+class PerceptionManager:
+    def update(self, source: str, observation: PerceptionEntry) -> None: ...
+    def get_snapshot(self) -> list[PerceptionEntry]: ...
+    def get_snapshot_by_source(self, source: str) -> PerceptionEntry | None: ...
+```
+
+**データ構造:**
+```python
+@dataclass
+class PerceptionEntry:
+    source: str           # "vision", "tactile", ...
+    text: str             # LLMコンテキストに注入するテキスト表現
+    timestamp: float      # 観測時刻
+    priority: int         # コンテキストのトークン配分時の優先度
+    ttl: float            # 有効期限（秒）
+```
+
+新しいセンサーの追加手順: 新しいWorkerを作り、`perception.update` イベントを発行するだけ。LLMWorkerの修正は不要。
+
+詳細は `llm-conversation-design.md` を参照。
+
+---
+
+### 11. MemoryWorker
 
 RAGによる記憶機能。
 

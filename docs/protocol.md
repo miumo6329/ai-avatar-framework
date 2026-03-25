@@ -282,6 +282,23 @@ conversation_state の値:
 - `listening` - 聞いている
 - `thinking` - 考えている
 - `speaking` - 話している
+- `interrupted` - 割り込みにより中断（一時的、すぐにlisteningへ遷移）
+
+### 割り込み制御 (Core → Adapter)
+
+#### `tts.stop`
+
+アバター発話の即時停止指示。ユーザー割り込み検出時に送信。
+
+```json
+{
+  "type": "tts.stop",
+  "timestamp": 1234567890.123,
+  "payload": {}
+}
+```
+
+Adapter側は再生中の音声を即座に停止し、バッファをクリアする。
 
 ## フロー例：基本的な会話
 
@@ -319,5 +336,73 @@ sequenceDiagram
     Core->>Adapter: tts.audio (final)
     Core->>Adapter: llm.done
     Core->>Adapter: state.update (idle)
+  end
+```
+
+## フロー例：リアクション付き会話（パイプライン並列化）
+
+```mermaid
+sequenceDiagram
+  participant Adapter
+  participant Core
+
+  rect rgb(255, 243, 224)
+    Note over Adapter, Core: ユーザー発話中 → リアクション
+    Adapter->>Core: audio.input (chunks...)
+    Core->>Adapter: state.update (listening)
+    Note over Core: stt.clause検出「今日さ、」
+    Core->>Adapter: expression.set (neutral, nod)
+    Note over Core: RAG先行検索開始
+    Note over Core: stt.clause検出「仕事で嫌なことがあって、」
+    Core->>Adapter: expression.set (sad, 0.5)
+    Note over Core: VADが発話終了検出
+  end
+
+  rect rgb(232, 245, 233)
+    Note over Adapter, Core: 本応答（RAG結果は先行検索済み）
+    Core->>Adapter: stt.final
+    Core->>Adapter: llm.thinking
+    Core->>Adapter: state.update (thinking)
+    Core->>Adapter: llm.response (chunk)
+    Core->>Adapter: expression.set (sad, 0.7)
+    Core->>Adapter: tts.audio (chunk 1)
+    Core->>Adapter: state.update (speaking)
+    Core->>Adapter: tts.audio (chunk 2)
+    Core->>Adapter: llm.done
+    Core->>Adapter: state.update (idle)
+  end
+```
+
+## フロー例：ユーザー割り込み
+
+```mermaid
+sequenceDiagram
+  participant Adapter
+  participant Core
+
+  rect rgb(232, 245, 233)
+    Note over Adapter, Core: アバター発話中
+    Core->>Adapter: tts.audio (chunk 1)
+    Core->>Adapter: state.update (speaking)
+    Core->>Adapter: tts.audio (chunk 2)
+  end
+
+  rect rgb(255, 230, 230)
+    Note over Adapter, Core: ユーザー割り込み
+    Adapter->>Core: audio.input (user starts speaking)
+    Note over Core: vad.speech_start検出 + 300ms猶予
+    Note over Core: 猶予後もユーザー発話継続 → 割り込み確定
+    Core->>Adapter: tts.stop
+    Core->>Adapter: state.update (interrupted)
+    Core->>Adapter: state.update (listening)
+  end
+
+  rect rgb(255, 243, 224)
+    Note over Adapter, Core: ユーザーの新しい発話を処理
+    Adapter->>Core: audio.input (chunks...)
+    Note over Core: VADが発話終了検出
+    Core->>Adapter: stt.final
+    Core->>Adapter: llm.thinking
+    Note over Core: 会話履歴に中断された応答も含む
   end
 ```

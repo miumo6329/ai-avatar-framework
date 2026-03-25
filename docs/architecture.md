@@ -20,6 +20,8 @@ graph TB
     subgraph core["Python Core (uv addで提供)"]
       Engine
       EventBus
+      ConversationManager
+      PerceptionManager
       Workers
       RAGEngine
       WebSocketServer
@@ -72,24 +74,40 @@ engine.run()
 
 主要イベント:
 - `audio.input` - 音声入力データ受信
-- `stt.result` - 音声認識結果
-- `llm.response` - LLM応答（ストリーミング）
-- `tts.audio` - 音声合成結果
-- `vision.observation` - 視覚認識結果
-- `expression.command` - 表情指示
-- `animation.command` - アニメーション指示
+- `vad.speech_start` / `vad.speech_end` / `vad.pause` - 音声区間検出
+- `stt.partial` / `stt.clause` / `stt.final` - 音声認識結果
+- `llm.response_chunk` / `llm.response_done` - LLM応答（ストリーミング）
+- `llm.expression` / `llm.animation` - 表情・アニメーション指示
+- `tts.audio_chunk` - 音声合成結果
+- `perception.update` / `perception.trigger` - 知覚情報
+- `turn.interrupt` / `turn.cancel` / `tts.stop` - 割り込み制御
+- `memory.context` - RAG検索結果
+
+### ConversationManager
+
+会話の状態管理とイベント優先度判断を専任するコンポーネント。
+会話状態マシン（IDLE / LISTENING / PROCESSING / SPEAKING / INTERRUPTED）を管理し、
+割り込み制御やイベント優先度に基づく判断を行う。
+詳細は `llm-conversation-design.md` を参照。
+
+### PerceptionManager
+
+全センサー（視覚・触覚・距離等）の最新状態を集約・保持するコンポーネント。
+各センサーWorkerが `perception.update` で知覚を登録し、LLMWorkerがコンテキスト構築時に `get_snapshot()` で最新状態を取得する（push/pull非対称パターン）。
+新しいセンサー追加時にLLMWorkerの修正が不要な拡張性を持つ。
+詳細は `llm-conversation-design.md` を参照。
 
 ### Workers
 
-各機能を担う非同期ワーカー。
+各機能を担う非同期ワーカー。全Workerは同一プロセス内のasyncioタスクとして動作する。
 
 | Worker | 種別 | 役割 |
 |--------|------|------|
-| ListenerWorker | Permanent | 常時音声ストリーミング受信、音声チャンクをSTTWorkerに転送 |
-| STTWorker | Permanent | 音声→テキスト変換（STTアダプター経由、後述） |
-| LLMWorker | Permanent | LLM呼び出し（ストリーミング応答） |
+| ListenerWorker | Permanent | 常時音声ストリーミング受信、VAD（発話開始/終了/pause検出） |
+| STTWorker | Permanent | 音声→テキスト変換（STTアダプター経由、partial/clause/final発行） |
+| LLMWorker | Permanent | LLM呼び出し（ストリーミング応答）+ リアクション判定 |
 | TTSWorker | Permanent | テキスト→音声変換 |
-| VisionWorker | Permanent | カメラ映像→環境認識（軽量VLM） |
+| VisionWorker | Permanent | カメラ映像→環境認識（PerceptionManagerに登録） |
 | MemoryWorker | Permanent | RAG検索・保存 |
 
 ### RAGEngine
@@ -125,18 +143,29 @@ UPMパッケージとして提供。アバターのUnityプロジェクトから
 
 ## リアルタイム応答フロー
 
+イベント駆動 + パイプライン並列化方式を採用。固定間隔ポーリングではなく、
+意味のある区切り（節区切り）をトリガーとする。詳細は `llm-conversation-design.md` を参照。
+
 ```
 音声入力(常時ストリーミング)
     │
     ▼
 VAD(音声区間検出)
-    ├─ 発話中     → バッファリング継続
-    │              + 一定間隔でLLMにプレビュー送信
-    │              (LLMは「まだ聞いている」と判断すれば応答しない)
-    └─ 発話終了   → LLMに完全テキスト送信
-                   → LLMがストリーミング応答開始
-                   → TTS逐次変換 → 音声出力開始
-                   → 同時に表情・アニメーション指示送信
+    ├─ 発話中 + 節区切り検出 → STTが stt.clause 発行
+    │                         → MemoryWorkerがRAG先行検索（パイプライン並列化）
+    │                         → リアクション判定（相槌・表情、LLM APIは叩かない）
+    │
+    ├─ 短い間(pause)          → vad.pause発行（節区切り検出の補助）
+    │
+    └─ 発話終了               → stt.final発行
+                               → LLMに完全テキスト送信（RAG結果は先行検索済み）
+                               → LLMがストリーミング応答開始
+                               → TTS逐次変換 → 音声出力開始
+                               → 同時に表情・アニメーション指示送信
+
+割り込み（アバター発話中にユーザーが話し始めた場合）:
+    → 300ms猶予後に中断確定
+    → LLM/TTS停止 → LISTENING状態に遷移
 ```
 
 ## 提供形態
