@@ -347,24 +347,24 @@ sequenceDiagram
   participant Core
 
   rect rgb(255, 243, 224)
-    Note over Adapter, Core: ユーザー発話中 → ReactionWorkerがリアクション判定
+    Note over Adapter, Core: ユーザー発話中 <br/>→ ReactionWorkerがリアクション判定
     Adapter->>Core: audio.input (chunks...)
     Core->>Adapter: state.update (listening)
     Note over Core: stt.clause検出「今日さ、」→ ReactionWorker
     Core->>Adapter: expression.set (neutral, nod)
-    Note over Core: RAG先行検索開始
-    Note over Core: stt.clause検出「仕事で嫌なことがあって、」→ ReactionWorker
+    Note over Core: stt.clause検出「仕事で嫌なことがあって、」<br/>→ ReactionWorker
     Core->>Adapter: expression.set (sad, 0.5)
     Note over Core: VADが発話終了検出
   end
 
   rect rgb(232, 245, 233)
-    Note over Adapter, Core: 本応答（RAG結果は先行検索済み、LLMはテキストのみ生成）
+    Note over Adapter, Core: 本応答<br/>（RAG検索 + コンテキスト構築 <br/>→ LLMはテキストのみ生成）
+    Note over Core: stt.final <br/>→ MemoryWorker: RAG検索（~60ms）
     Core->>Adapter: stt.final
     Core->>Adapter: llm.thinking
     Core->>Adapter: state.update (thinking)
     Core->>Adapter: llm.response (chunk)
-    Note over Core: llm.response_chunk → ReactionWorker → 表情判定
+    Note over Core: llm.response_chunk <br/>→ ReactionWorker → 表情判定
     Core->>Adapter: expression.set (sad, 0.7)
     Core->>Adapter: tts.audio (chunk 1)
     Core->>Adapter: state.update (speaking)
@@ -392,7 +392,7 @@ sequenceDiagram
     Note over Adapter, Core: ユーザー割り込み
     Adapter->>Core: audio.input (user starts speaking)
     Note over Core: vad.speech_start検出 + 300ms猶予
-    Note over Core: 猶予後もユーザー発話継続 → 割り込み確定
+    Note over Core: 猶予後もユーザー発話継続 <br/>→ 割り込み確定
     Core->>Adapter: tts.stop
     Core->>Adapter: state.update (interrupted)
     Core->>Adapter: state.update (listening)

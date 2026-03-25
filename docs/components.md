@@ -52,7 +52,7 @@ class EventBus:
 | vad.pause | ListenerWorker | STTWorker | 発話中の短い間（300-500ms）を検出 |
 | vad.speech_end | ListenerWorker | STTWorker, ConversationManager | 音声バッファ |
 | stt.partial | STTWorker | WebSocketServer | 中間テキスト |
-| stt.clause | STTWorker | LLMWorker, MemoryWorker | 節区切りテキスト |
+| stt.clause | STTWorker | LLMWorker, ReactionWorker | 節区切りテキスト |
 | stt.final | STTWorker | LLMWorker, MemoryWorker, ConversationManager | 確定テキスト |
 | llm.response_chunk | LLMWorker | TTSWorker, WebSocketServer | テキストチャンク |
 | llm.response_done | LLMWorker | MemoryWorker, WebSocketServer, ConversationManager | 完全テキスト |
@@ -342,22 +342,134 @@ class PerceptionEntry:
 
 ### 11. MemoryWorker
 
-RAGによる記憶機能。
+会話の記憶管理を担うWorker。会話バッファの管理、要約生成、RAG検索の制御を行う。
+RAGEngine（§12）を内部的に利用してベクトルDBとのやり取りを行う。
 
 **責務:**
-- 会話内容のEmbedding生成・保存
-- ユーザー発話に関連する記憶の検索
-- 検索結果のLLMコンテキスト注入
+- 会話バッファの蓄積（ターン単位で蓄積し、トピック単位で要約・保存）
+- 要約タイミングの判断（トピック変化検出 / バッファ上限 / セッション終了）
+- 要約LLMの呼び出し（軽量モデル）
+- RAG検索の制御（`stt.final` 時に検索を実行し、結果をLLMWorkerへ送信）
+- RAGEngineへの保存・検索指示
+
+**購読するイベント:**
+- `stt.final` - ユーザー発話確定テキスト（RAG検索トリガー + 会話バッファへの蓄積）
+- `llm.response_done` - アバター応答完了（会話バッファへの蓄積 + 要約判定）
+
+**発行するイベント:**
+- `memory.context` - RAG検索結果をLLMWorkerへ送信
+
+**会話バッファと要約フロー:**
+```
+ターン蓄積:
+  Turn 1: User「...」 Avatar「...」 → バッファに追加
+  Turn 2: User「...」 Avatar「...」 → バッファに追加
+  ...
+
+要約トリガー（OR条件）:
+  1. トピック変化検出 → 即座に要約・保存
+  2. バッファがmax_buffer_turns（設定値）に到達 → 強制的に要約・保存
+  3. セッション終了 → 残りバッファを要約・保存
+```
+
+要約済みのターンはコンテキストの会話履歴から削除し、トークンを節約する。
+RAG検索でヒットすれば過去の要約がコンテキストに注入される。
+
+**要約LLM（軽量モデル）の用途:**
+
+MemoryWorker専用の軽量LLM（0.5B-1Bクラス）を使用する。以下の用途で使い回す。
+
+| 用途 | 入力 | 出力 |
+|------|------|------|
+| 会話要約 | 会話バッファ（複数ターン） | 要約テキスト |
+| トピック変化検出 | 前回の要約 + 現在のバッファ | yes / no |
+| 検索クエリ構築 | ユーザー発話テキスト | 構造化クエリ（検索テキスト + メタデータフィルタ） |
+
+検索クエリ構築の例:
+```
+入力: 「去年の12月15日に車の話したの覚えてる？」
+出力: { query: "車の話題", date_filter: "2025-12-15" }
+```
+
+日付や固有名詞による検索は、ベクトル類似度だけでは精度が出ないため、
+LLMで構造化クエリを生成し、メタデータフィルタとベクトル検索を併用する。
+
+**RAG検索のタイミング:**
+
+`stt.final` 受信時に1回のみ検索を実行する。先行検索は行わない。
+
+```
+stt.final
+  ├── MemoryWorker: Embedding化 + ベクトルDB検索（~60ms）──┐
+  ├── LLMWorker: コンテキスト構築開始                      │
+  │    personality, perception, 履歴を組み立て             │
+  │    ...RAG結果を待つ...                               ◄┘
+  └── LLMWorker: RAG結果を注入 → LLM APIリクエスト送信
+```
+
+検索レイテンシ（Embedding化 + ベクトル検索で30-60ms程度）はコンテキスト構築と並列に走るため、
+LLM応答生成（TTFT: 200-500ms）に比べてボトルネックにならない。
+
+**保存レコードの構造:**
+```python
+@dataclass
+class MemoryRecord:
+    text: str              # 要約テキスト
+    embedding: list[float] # ベクトル
+    timestamp: datetime    # 会話時刻
+    metadata: dict         # session_id, topic, date等
+```
+
+**設定パラメータ（memory.yaml）:**
+```yaml
+buffer:
+  max_buffer_turns: 5        # 要約を強制実行するターン数上限
+
+rag:
+  similarity_threshold: 0.7  # 検索結果の関連度フィルタ閾値
+  max_results: 5             # 検索結果の最大件数
+
+summary_llm:
+  model: "qwen2.5:0.5b"     # 要約・クエリ構築に使用する軽量モデル
+```
+
+---
+
+### 12. RAGEngine
+
+ベクトルDBとのやり取りを担うインフラ層コンポーネント。EventBusには接続せず、MemoryWorkerから直接呼び出される。
+
+**責務:**
+- Embeddingモデルの呼び出し（テキスト → ベクトル変換）
+- ベクトルDBへの保存
+- ベクトル類似度検索 + メタデータフィルタリング
+
+**インターフェース:**
+```python
+class RAGEngine:
+    def __init__(self, db_path: str, embedding_model: str): ...
+
+    async def store(self, text: str, metadata: dict) -> None:
+        """テキストをEmbedding化してベクトルDBに保存"""
+
+    async def search(self, query: str, n_results: int = 5,
+                     metadata_filter: dict | None = None) -> list[SearchResult]:
+        """ベクトル類似度検索。メタデータフィルタとの併用が可能"""
+```
+
+```python
+@dataclass
+class SearchResult:
+    text: str           # 保存されたテキスト（要約）
+    similarity: float   # 類似度スコア（0.0-1.0）
+    metadata: dict      # 保存時のメタデータ
+```
 
 **使用ライブラリ候補:**
-- ChromaDB（ベクトルDB、ローカル）
-- OpenAI Embeddings API
+- ChromaDB（ベクトルDB、ローカル、メタデータフィルタ対応）
+- OpenAI Embeddings API / ローカルEmbeddingモデル
 
-**データフロー:**
-```
-会話完了 → テキスト → Embedding → ベクトルDB保存（data/memory_db/）
-新しい発話 → 検索クエリ → ベクトルDB検索 → 関連記憶 → LLMコンテキスト
-```
+**データ保存先:** アバタープロジェクトの `brain/data/memory_db/`
 
 ---
 
