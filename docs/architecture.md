@@ -77,7 +77,7 @@ engine.run()
 - `vad.speech_start` / `vad.speech_end` / `vad.pause` - 音声区間検出
 - `stt.partial` / `stt.clause` / `stt.final` - 音声認識結果
 - `llm.response_chunk` / `llm.response_done` - LLM応答（ストリーミング）
-- `llm.expression` / `llm.animation` - 表情・アニメーション指示
+- `reaction.expression` / `reaction.animation` / `reaction.backchannel` - 表情・アニメーション・相槌指示（ReactionWorker）
 - `tts.audio_chunk` - 音声合成結果
 - `perception.update` / `perception.trigger` - 知覚情報
 - `turn.interrupt` / `turn.cancel` / `tts.stop` - 割り込み制御
@@ -105,7 +105,8 @@ engine.run()
 |--------|------|------|
 | ListenerWorker | Permanent | 常時音声ストリーミング受信、VAD（発話開始/終了/pause検出） |
 | STTWorker | Permanent | 音声→テキスト変換（STTアダプター経由、partial/clause/final発行） |
-| LLMWorker | Permanent | LLM呼び出し（ストリーミング応答）+ リアクション判定 |
+| LLMWorker | Permanent | LLM呼び出し（ストリーミング応答、テキスト生成のみ） |
+| ReactionWorker | Permanent | 軽量ローカルモデルによる表情・アニメーション判定（常時テキストを受け取り推論） |
 | TTSWorker | Permanent | テキスト→音声変換 |
 | VisionWorker | Permanent | カメラ映像→環境認識（PerceptionManagerに登録） |
 | MemoryWorker | Permanent | RAG検索・保存 |
@@ -153,7 +154,7 @@ UPMパッケージとして提供。アバターのUnityプロジェクトから
 VAD(音声区間検出)
     ├─ 発話中 + 節区切り検出 → STTが stt.clause 発行
     │                         → MemoryWorkerがRAG先行検索（パイプライン並列化）
-    │                         → リアクション判定（相槌・表情、LLM APIは叩かない）
+    │                         → ReactionWorker（軽量モデルで相槌・表情判定）
     │
     ├─ 短い間(pause)          → vad.pause発行（節区切り検出の補助）
     │
@@ -161,7 +162,7 @@ VAD(音声区間検出)
                                → LLMに完全テキスト送信（RAG結果は先行検索済み）
                                → LLMがストリーミング応答開始
                                → TTS逐次変換 → 音声出力開始
-                               → 同時に表情・アニメーション指示送信
+                               → ReactionWorkerが応答チャンクから表情・アニメーション判定
 
 割り込み（アバター発話中にユーザーが話し始めた場合）:
     → 300ms猶予後に中断確定

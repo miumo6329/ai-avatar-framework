@@ -347,23 +347,24 @@ sequenceDiagram
   participant Core
 
   rect rgb(255, 243, 224)
-    Note over Adapter, Core: ユーザー発話中 → リアクション
+    Note over Adapter, Core: ユーザー発話中 → ReactionWorkerがリアクション判定
     Adapter->>Core: audio.input (chunks...)
     Core->>Adapter: state.update (listening)
-    Note over Core: stt.clause検出「今日さ、」
+    Note over Core: stt.clause検出「今日さ、」→ ReactionWorker
     Core->>Adapter: expression.set (neutral, nod)
     Note over Core: RAG先行検索開始
-    Note over Core: stt.clause検出「仕事で嫌なことがあって、」
+    Note over Core: stt.clause検出「仕事で嫌なことがあって、」→ ReactionWorker
     Core->>Adapter: expression.set (sad, 0.5)
     Note over Core: VADが発話終了検出
   end
 
   rect rgb(232, 245, 233)
-    Note over Adapter, Core: 本応答（RAG結果は先行検索済み）
+    Note over Adapter, Core: 本応答（RAG結果は先行検索済み、LLMはテキストのみ生成）
     Core->>Adapter: stt.final
     Core->>Adapter: llm.thinking
     Core->>Adapter: state.update (thinking)
     Core->>Adapter: llm.response (chunk)
+    Note over Core: llm.response_chunk → ReactionWorker → 表情判定
     Core->>Adapter: expression.set (sad, 0.7)
     Core->>Adapter: tts.audio (chunk 1)
     Core->>Adapter: state.update (speaking)

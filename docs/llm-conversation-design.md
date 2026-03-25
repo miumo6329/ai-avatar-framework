@@ -102,6 +102,7 @@ stateDiagram-v2
 sequenceDiagram
     participant User as ユーザー
     participant STT as STTWorker
+    participant RW as ReactionWorker
     participant Mem as MemoryWorker
     participant LLM as LLMWorker
     participant TTS as TTSWorker
@@ -109,44 +110,116 @@ sequenceDiagram
     rect rgb(255, 243, 224)
         Note over User, TTS: ユーザー発話中（パイプライン並列化）
         User ->> STT: 音声ストリーム
-        STT -->> LLM: stt.clause「今日さ、」
+        STT -->> RW: stt.clause「今日さ、」(speaker: user)
         STT -->> Mem: stt.clause → RAG先行検索①開始
-        LLM -->> LLM: リアクション判定 → うなずき
-        STT -->> LLM: stt.clause「仕事で嫌なことがあって、」
+        RW -->> RW: 軽量モデル推論(~20ms) → うなずき
+        STT -->> RW: stt.clause「仕事で嫌なことがあって、」(speaker: user)
         STT -->> Mem: stt.clause → RAG先行検索②追加
-        LLM -->> LLM: リアクション判定 → 心配そうな表情
+        RW -->> RW: 軽量モデル推論(~20ms) → 心配そうな表情
         Note over Mem: RAG結果はバッファに蓄積済み
     end
 
     rect rgb(232, 245, 233)
         Note over User, TTS: 発話終了 → 本応答（コンテキスト構築済みで即座に開始）
         STT ->> LLM: stt.final（全文テキスト）
+        STT -->> RW: stt.final (speaker: user)
+        RW -->> RW: 応答開始時の表情判定
         Mem -->> LLM: RAG結果（先行検索済み）
-        LLM ->> TTS: llm.response_chunk（ストリーミング）
+        LLM ->> TTS: llm.response_chunk（ストリーミング・テキストのみ）
+        LLM -->> RW: llm.response_chunk (speaker: avatar)
+        RW -->> RW: 発話内容に応じた表情変化
         TTS ->> User: 音声再生開始
     end
 ```
 
-### リアクション判定（stt.clause時）
+### ReactionWorker（表情・アニメーション専任）
 
-stt.clause受信時は**LLM APIを叩かない**。低コスト・低レイテンシでリアクションを返す。
+表情・アニメーションの判定をLLMWorkerから完全に分離し、**ローカル軽量モデル（0.5B-1Bクラス）による専任Worker**とする。
+ReactionWorkerはユーザー・アバター問わず流れてくるテキストを常時受け取り、リアルタイムに表情・アニメーションを決定する。
+
+**分離の理由:**
+- LLMWorkerはテキスト生成のみに専念でき、プロンプトがシンプルになる
+- LLM応答フォーマットにemotionタグ等の制約を課す必要がなくなる
+- ストリーミング応答からの構造化データ抽出（部分JSONパース等）が不要になる
+- モデル選択の自由度が上がる（テキスト生成能力だけ求めればよい）
+
+#### 入力ストリーム
+
+ReactionWorkerは以下の全てのテキストイベントを購読し、同一パイプラインで処理する。
+Phase分けや入力種別による処理分岐は行わない。
+
+```
+入力ストリーム（途切れなく流れてくる）:
+  stt.partial  →  「今日さ、」                (speaker: user)
+  stt.partial  →  「今日さ、仕事で」          (speaker: user)
+  stt.clause   →  「今日さ、仕事で嫌なことがあって、」  (speaker: user)
+  stt.final    →  「...もう疲れた」           (speaker: user)
+  llm.response_chunk → 「大変だった」         (speaker: avatar)
+  llm.response_chunk → 「大変だったね。」     (speaker: avatar)
+  llm.response_chunk → 「ゆっくり休んだ方がいいよ。」  (speaker: avatar)
+```
+
+#### 入力データ構造
+
+```python
+@dataclass
+class ReactionInput:
+    text: str                  # テキスト断片
+    speaker: "user" | "avatar" # 誰の発話か
+```
+
+speaker情報が必要な理由: ユーザーの「悲しい」に対するリアクション（共感）と、
+自分が「大変だったね」と言っている時の表情（穏やかな微笑み）は異なるため。
+
+#### 出力
+
+```python
+@dataclass
+class ReactionResult:
+    emotion: str              # "empathy", "joy", "neutral", ...
+    animation: str | None     # "nod", "tilt_head", "lean_forward", None
+    backchannel: str | None   # "うん", "へぇ", None（userの発話中のみ）
+```
+
+選択肢はAdapter Capabilities（connection.helloで受信した表情・アニメーション一覧）から選択する。
+
+#### 軽量モデルの選定方針
+
+| 方式 | レイテンシ (GPU) | メリット | デメリット |
+|------|-----------------|---------|-----------|
+| ローカル軽量LLM (0.5B-1B) | 15-40ms | プロンプトでラベル体系を変更可能。avatar project毎のカスタマイズが容易 | GPU推奨 |
+| fine-tuned distilBERT系 | 1-3ms | 超低レイテンシ。CPUでも高速 | ラベル変更時に再学習が必要 |
+
+**推奨: ローカル軽量LLM**。avatar projectごとに表情・アニメーションのバリエーションが異なることを前提とすると、
+プロンプトで制御できる方が拡張性が高い。
+
+#### フロー全体像
 
 ```mermaid
-flowchart TD
-    A["stt.clause 受信"] --> B{"リアクション判定<br/>(LLM APIは叩かない)"}
-    B --> C["方式A: ルールベース（初期実装）"]
-    B --> D["方式B: 軽量モデル（将来拡張）"]
-    C --> C1["「？」で終わる → 小首かしげ"]
-    C --> C2["ネガティブワード → 心配そうな表情"]
-    C --> C3["一般的な節 → うなずき"]
-    D --> D1["ローカル小型分類モデルで感情分類"]
-    C1 --> E["EventBusに<br/>expression/animation イベントを発行"]
-    C2 --> E
-    C3 --> E
-    D1 --> E
+sequenceDiagram
+    participant STT as STTWorker
+    participant RW as ReactionWorker<br/>(軽量モデル)
+    participant LLM as LLMWorker<br/>(メインLLM)
+    participant TTS as TTSWorker
+    participant WS as WebSocketServer
+
+    Note over STT, WS: ユーザー発話中
+    STT -->> RW: stt.partial / stt.clause (speaker: user)
+    RW -->> WS: reaction.expression → 心配顔
+    RW -->> WS: reaction.animation → うなずき
+
+    Note over STT, WS: 発話終了 → 本応答
+    STT ->> LLM: stt.final
+    LLM ->> TTS: llm.response_chunk「大変だったね。」(ストリーミング)
+    LLM -->> RW: llm.response_chunk (speaker: avatar)
+    RW -->> WS: reaction.expression → gentle_smile
+    RW -->> WS: reaction.animation → nod
+    TTS ->> WS: tts.audio_chunk（音声）
 ```
 
 ### 本応答生成（stt.final時）
+
+LLMWorkerは**テキスト生成のみ**を行う。感情・アニメーションの判定はReactionWorkerが担当する。
 
 ```mermaid
 flowchart TD
@@ -159,9 +232,8 @@ flowchart TD
     B --> B6["stt.final フルテキスト"]
     B1 & B2 & B3 & B4 & B5 & B6 --> C["LLM APIストリーミングリクエスト"]
     C --> D1["チャンク受信 → llm.response_chunk → TTSWorker"]
-    C --> D2["感情抽出 → llm.expression → WebSocketServer"]
-    C --> D3["アニメ抽出 → llm.animation → WebSocketServer"]
-    D1 & D2 & D3 --> E["llm.response_done → MemoryWorker（会話保存）"]
+    C --> D2["チャンク受信 → llm.response_chunk → ReactionWorker<br/>（表情・アニメーション判定）"]
+    D1 & D2 --> E["llm.response_done → MemoryWorker（会話保存）"]
 ```
 
 ---
@@ -405,13 +477,15 @@ CONTEXT_PRIORITY = [
 
 ## LLMレスポンス
 
+LLMWorkerはプレーンテキストのみを返す。感情・アニメーション関連のフィールドは含まない。
+
 | action | 用途 | トリガー |
 |--------|------|---------|
-| `respond` | 本応答 | VAD発話終了後のstt.final |
+| `respond` | 本応答（テキストのみ） | VAD発話終了後のstt.final |
 | `wait` | まだ聞いている（応答しない） | VAD発話終了（でもまだ続きそうと判断） |
 | `think` | 考え中表示 → 詳細応答 | VAD発話終了（複雑な質問等） |
-| `backchannel` | 相槌・表情のみ（新規） | 節区切り時のリアクション判定 |
-| `interrupt` | アバターが口を挟む（新規） | 節区切り時（稀なケース） |
+
+※ `backchannel` / `interrupt` はReactionWorkerの責務。LLMWorkerのactionからは除外。
 
 ---
 
@@ -423,6 +497,7 @@ sequenceDiagram
     participant Listener as ListenerWorker
     participant CM as ConversationMgr
     participant STT as STTWorker
+    participant RW as ReactionWorker
     participant Mem as MemoryWorker
     participant LLM as LLMWorker
     participant TTS as TTSWorker
@@ -434,9 +509,9 @@ sequenceDiagram
         CM ->> CM: IDLE → LISTENING
         Listener ->> STT: 音声チャンク転送
         Listener ->> CM: vad.pause（短い間検出）
-        STT ->> LLM: stt.clause「今日さ、」
+        STT ->> RW: stt.clause「今日さ、」(speaker: user)
         STT ->> Mem: stt.clause → RAG先行検索①開始
-        LLM ->> LLM: リアクション判定 → うなずき
+        RW -->> RW: 軽量モデル推論(~20ms) → うなずき
     end
 
     rect rgb(255, 243, 224)
@@ -444,9 +519,9 @@ sequenceDiagram
         User ->> Listener: 音声ストリーム
         Listener ->> STT: 音声チャンク転送
         Listener ->> CM: vad.pause（短い間検出）
-        STT ->> LLM: stt.clause「仕事で嫌なことがあって、」
+        STT ->> RW: stt.clause「仕事で嫌なことがあって、」(speaker: user)
         STT ->> Mem: stt.clause → RAG先行検索②追加
-        LLM ->> LLM: リアクション判定 → 心配そうな表情
+        RW -->> RW: 軽量モデル推論(~20ms) → 心配そうな表情
     end
 
     rect rgb(232, 245, 233)
@@ -454,11 +529,15 @@ sequenceDiagram
         User ->> Listener: 「もう疲れた」+ 沈黙
         Listener ->> CM: vad.speech_end
         STT ->> LLM: stt.final「今日さ、仕事で嫌なことがあって、もう疲れた」
+        STT ->> RW: stt.final (speaker: user)
         STT ->> CM: stt.final
         CM ->> CM: LISTENING → PROCESSING
+        RW -->> RW: 軽量モデル推論 → empathy表情
         Mem -->> LLM: RAG結果①②（先行検索済み）
         Note over LLM: コンテキスト構築<br/>personality + RAG①②結果<br/>+ perception + 会話履歴 + 全文テキスト
-        LLM ->> TTS: llm.response_chunk（ストリーミング）
+        LLM ->> TTS: llm.response_chunk（ストリーミング・テキストのみ）
+        LLM -->> RW: llm.response_chunk (speaker: avatar)
+        RW -->> RW: 軽量モデル推論 → 発話内容に応じた表情変化
         TTS ->> User: 音声再生開始
     end
 ```
