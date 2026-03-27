@@ -10,7 +10,7 @@
 
 | ディレクトリ | 内容 | 提供方法 |
 |-------------|------|---------|
-| `core/` | Python AIコア（Engine, Workers, RAGEngine等） | pip install |
+| `core/` | Python AIコア（Engine, Workers, RAGEngine等） | uv add |
 | `adapters/unity-package/` | Unity Adapter Base（WebSocketClient, インターフェース定義） | UPM |
 | `proto/` | 共通メッセージプロトコル定義 | 参照 |
 | `docs/` | 設計ドキュメント | - |
@@ -21,6 +21,9 @@
 - [プロジェクト構成](docs/project-structure.md) - ディレクトリ構造、UPM参照方法
 - [プロトコル仕様](docs/protocol.md) - WebSocketメッセージ定義
 - [コンポーネント詳細](docs/components.md) - 各Worker・Adapterの責務
+- [会話制御設計](docs/llm-conversation-design.md) - ターンテイキング・コンテキスト構築・割り込み処理
+- [TTS音声バッファリング設計](docs/tts-buffering-design.md) - テキスト分割・合成キュー・先読み方式
+- [タイムアウト・障害復旧設計](docs/timeout-resilience-design.md) - タイムアウト仕様・リトライ・Worker稼働状態管理
 
 ## アバタープロジェクトとの関係
 

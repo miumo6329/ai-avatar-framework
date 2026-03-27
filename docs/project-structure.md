@@ -8,7 +8,10 @@ ai-avatar-framework/
 │   ├── architecture.md                #   アーキテクチャ全体設計
 │   ├── project-structure.md           #   本ドキュメント
 │   ├── protocol.md                    #   WebSocketメッセージプロトコル仕様
-│   └── components.md                  #   コンポーネント詳細設計
+│   ├── components.md                  #   コンポーネント詳細設計
+│   ├── llm-conversation-design.md     #   会話制御設計（ターンテイキング・割り込み・コンテキスト構築）
+│   ├── tts-buffering-design.md        #   TTS音声バッファリング設計
+│   └── timeout-resilience-design.md   #   タイムアウト・リトライ・障害復旧設計
 │
 ├── core/                              # Python AIコア（pipパッケージ）
 │   ├── pyproject.toml                 #   パッケージ定義
@@ -24,9 +27,12 @@ ai-avatar-framework/
 │   │       │   ├── listener.py        #   ListenerWorker - 音声入力+VAD
 │   │       │   ├── stt.py             #   STTWorker - 音声認識
 │   │       │   ├── llm.py             #   LLMWorker - LLM呼び出し
+│   │       │   ├── reaction.py        #   ReactionWorker - 表情・アニメーション判定
 │   │       │   ├── tts.py             #   TTSWorker - 音声合成
 │   │       │   ├── vision.py          #   VisionWorker - 視覚認識
 │   │       │   └── memory.py          #   MemoryWorker - RAG管理
+│   │       ├── conversation_manager.py #   ConversationManager - 会話状態管理
+│   │       ├── perception_manager.py   #   PerceptionManager - センサー情報集約
 │   │       ├── memory/
 │   │       │   ├── __init__.py
 │   │       │   └── rag_engine.py      #   RAGEngine - 記憶機能
@@ -73,7 +79,9 @@ avatar-foo/
 │   │   ├── stt.yaml                   #   STT設定（エンジン種別、モデル等）
 │   │   ├── memory.yaml                #   RAG設定
 │   │   ├── vision.yaml                #   視覚認識設定
-│   │   └── llm.yaml                   #   LLMモデル・パラメータ設定
+│   │   ├── llm.yaml                   #   LLMモデル・パラメータ設定
+│   │   ├── health.yaml                #   Worker稼働状態閾値設定（任意、デフォルト値あり）
+│   │   └── timeouts.yaml              #   タイムアウト設定（任意、デフォルト値あり）
 │   ├── skills/                        #   カスタムスキル
 │   │   └── ...
 │   └── data/                          #   ランタイムデータ（gitignore推奨）

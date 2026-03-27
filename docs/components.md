@@ -52,7 +52,7 @@ class EventBus:
 | vad.pause | ListenerWorker | STTWorker | 発話中の短い間（300-500ms）を検出 |
 | vad.speech_end | ListenerWorker | STTWorker, ConversationManager | 音声バッファ |
 | stt.partial | STTWorker | WebSocketServer | 中間テキスト |
-| stt.clause | STTWorker | LLMWorker, ReactionWorker | 節区切りテキスト |
+| stt.clause | STTWorker | ReactionWorker | 節区切りテキスト |
 | stt.final | STTWorker | LLMWorker, MemoryWorker, ConversationManager | 確定テキスト |
 | llm.response_chunk | LLMWorker | TTSWorker, WebSocketServer | テキストチャンク |
 | llm.response_done | LLMWorker | MemoryWorker, WebSocketServer, ConversationManager | 完全テキスト |
@@ -153,6 +153,48 @@ class BaseWorker:
 - faster-whisper（ローカル、高速）
 - Google Cloud Speech-to-Text（ストリーミング対応）
 
+**stt.yaml と STTアダプター設計:**
+
+`stt.yaml` はSTTエンジンの種別と固有設定を記述する。
+
+```yaml
+stt:
+  engine: "whisper"
+
+  whisper:
+    model: "large-v3"
+    language: "ja"
+    api_url: "http://localhost:9000"
+
+  google:
+    language_code: "ja-JP"
+    model: "latest_long"
+```
+
+STTエンジンには一括変換型（Whisper）とストリーミング型（Google STT等）があり、
+VADの責務や `stt.partial` の可否が異なる。この差異はSTTAdapter内部で吸収する。
+ListenerWorkerは常に音声チャンクをSTTWorkerに送るだけとし、
+バッファリング・VAD・API呼び出しの違いはアダプター内部に閉じ込める。
+
+```
+ListenerWorker (音声チャンクを送るだけ)
+    │
+    ▼
+STTWorker
+  └── STTAdapter (共通インターフェース: audio chunk → callback(text, is_final))
+        ├── WhisperAdapter ─── 内部でバッファリング+VAD → 発話区間を一括変換
+        │                       stt.partial は発行しない
+        └── GoogleSTTAdapter ── チャンクをそのままStreaming APIに転送
+                                stt.partial / stt.final をリアルタイム発行
+```
+
+| エンジン種別 | VAD | stt.partial | stt.final |
+|------------|-----|-------------|-----------|
+| 一括型（Whisper） | アダプター内部で実行 | 非対応 | 発話区間ごとに発行 |
+| ストリーミング型（Google等） | API側で処理 | リアルタイム発行 | リアルタイム発行 |
+
+エンジン選択は `stt.yaml` の `stt.engine` 値で決定される。
+
 ---
 
 ### 6. LLMWorker
@@ -166,16 +208,7 @@ LLMへのリクエストとストリーミング応答の管理。**テキスト
 - テキスト応答のストリーミング送出
 - 「応答すべきか」の判断制御（respond / wait / think）
 
-**コンテキスト構築（本応答時）:**
-```
-① システムプロンプト（personality.yaml）     ← 必ず含める
-② Adapter Capabilities（connection.hello）  ← 必ず含める
-③ Perception Snapshot（PerceptionManager）  ← ttl内のもの
-④ RAG検索結果（MemoryWorker、先行検索済み）   ← 関連度でフィルタ
-⑤ 直近の会話履歴                             ← 圧縮対象
-⑥ ユーザー発話テキスト（stt.final）           ← 必ず含める
-```
-トークン不足時は⑤→④→③の順に削減する。詳細は `llm-conversation-design.md` を参照。
+コンテキスト構成要素（システムプロンプト・Adapter Capabilities・Perception Snapshot・RAG検索結果・会話履歴・現在の発話）とトークン配分優先度の詳細は `llm-conversation-design.md` を参照。
 
 **応答フォーマット（LLMに要求する出力形式）:**
 
@@ -210,9 +243,7 @@ actionの値:
 - 相槌の判定（ユーザー発話中のみ）
 
 **購読するイベント:**
-- `stt.partial` - ユーザー発話の中間テキスト
-- `stt.clause` - ユーザー発話の節区切りテキスト
-- `stt.final` - ユーザー発話の確定テキスト
+- `stt.partial` / `stt.clause` / `stt.final` - ユーザー発話テキスト
 - `llm.response_chunk` - アバター応答のテキストチャンク
 
 **発行するイベント:**
@@ -220,29 +251,7 @@ actionの値:
 - `reaction.animation` - アニメーション指示（WebSocketServerへ）
 - `reaction.backchannel` - 相槌指示（TTSWorkerへ、ユーザー発話中のみ）
 
-**入力データ構造:**
-```python
-@dataclass
-class ReactionInput:
-    text: str                  # テキスト断片
-    speaker: "user" | "avatar" # 誰の発話か
-```
-
-**出力データ構造:**
-```python
-@dataclass
-class ReactionResult:
-    emotion: str              # "empathy", "joy", "neutral", ...
-    animation: str | None     # "nod", "tilt_head", "lean_forward", None
-    backchannel: str | None   # "うん", "へぇ", None（userの発話中のみ）
-```
-
-**軽量モデルの選定方針:**
-
-推奨はローカル軽量LLM（Qwen2.5 0.5B, TinyLlama 1.1B等）。
-プロンプトで感情/アニメーションのラベル体系を変更できるため、avatar projectごとの表情・アニメーションバリエーションの違いに対応可能。GPU使用時のレイテンシは15-40msで、TTS合成（数百ms）より十分高速。
-
-詳細は `llm-conversation-design.md` を参照。
+データ構造・軽量モデル選定方針・処理フローの詳細は `llm-conversation-design.md` を参照。
 
 ---
 
@@ -269,6 +278,40 @@ class ReactionResult:
 **使用ライブラリ候補:**
 - VOICEVOX（日本語特化、ローカル）
 - AivisSpeech（VOICEVOX互換API）
+
+**tts.yaml と TTSアダプター設計:**
+
+`tts.yaml` はTTSエンジンの種別と固有設定を記述する。
+
+```yaml
+tts:
+  engine: "voicevox"          # TTSエンジン種別
+
+  voicevox:
+    host: "localhost"
+    port: 50021
+    speaker_id: 3
+    speed_scale: 1.0
+    pitch_scale: 0.0
+
+  google:
+    language_code: "ja-JP"
+    voice_name: "ja-JP-Neural2-B"
+    speaking_rate: 1.0
+```
+
+TTSエンジンごとに能力（感情パラメータ、音素情報の有無等）が大きく異なるため、
+共通インターフェースは最小限（テキスト→音声バイナリ）とし、エンジン固有の設定はYAML側に閉じ込める。
+
+```
+TTSWorker
+  └── TTSAdapter (共通インターフェース: text → audio bytes)
+        ├── VoicevoxAdapter
+        ├── GoogleTTSAdapter
+        └── ...（将来追加）
+```
+
+エンジン選択は `tts.yaml` の `tts.engine` 値で決定される。
 
 ---
 
@@ -297,6 +340,7 @@ class ReactionResult:
 ### 9. ConversationManager
 
 会話の状態管理とイベント優先度判断を専任するコンポーネント。
+LLMWorkerに全責務を押し込むと肥大化するため、状態管理・優先度判断・割り込み制御を分離している。
 
 **責務:**
 - 会話状態マシンの管理（IDLE / LISTENING / PROCESSING / SPEAKING / INTERRUPTED）
@@ -304,25 +348,14 @@ class ReactionResult:
 - 割り込み制御（猶予付き中断: 300ms）
 - 知覚トリガーによる能動発話の許可/却下判断
 
-**購読するイベント:**
-- `vad.speech_start` - ユーザー発話開始（割り込み判定を含む）
-- `vad.speech_end` - ユーザー発話終了
-- `stt.final` - 確定テキスト（状態遷移用）
-- `llm.response_done` - LLM応答完了（状態遷移用）
-- `tts.audio_chunk` (is_final=true) - TTS再生完了（状態遷移用）
-- `perception.trigger` - 知覚トリガー（能動発話判定）
-
-**発行するイベント:**
-- `turn.interrupt` - 現在の応答を中断
-- `tts.stop` - 音声再生の即時停止
-
-詳細は `llm-conversation-design.md` を参照。
+状態遷移図・イベント優先度体系・割り込みフローの詳細は `llm-conversation-design.md` を参照。
 
 ---
 
 ### 10. PerceptionManager
 
 全センサーの最新状態を集約・保持するコンポーネント。
+各センサーWorkerが `perception.update` でpush、LLMWorkerがコンテキスト構築時に `get_snapshot()` でpullする非対称パターン。
 
 **責務:**
 - 各センサーWorkerからの知覚情報を受信・保持
@@ -330,28 +363,9 @@ class ReactionResult:
 - LLMWorkerへの最新知覚スナップショット提供
 - 閾値超え検出による `perception.trigger` 発行
 
-**インターフェース:**
-```python
-class PerceptionManager:
-    def update(self, source: str, observation: PerceptionEntry) -> None: ...
-    def get_snapshot(self) -> list[PerceptionEntry]: ...
-    def get_snapshot_by_source(self, source: str) -> PerceptionEntry | None: ...
-```
-
-**データ構造:**
-```python
-@dataclass
-class PerceptionEntry:
-    source: str           # "vision", "tactile", ...
-    text: str             # LLMコンテキストに注入するテキスト表現
-    timestamp: float      # 観測時刻
-    priority: int         # コンテキストのトークン配分時の優先度
-    ttl: float            # 有効期限（秒）
-```
-
 新しいセンサーの追加手順: 新しいWorkerを作り、`perception.update` イベントを発行するだけ。LLMWorkerの修正は不要。
 
-詳細は `llm-conversation-design.md` を参照。
+インターフェース定義・`PerceptionEntry` データ構造・センサーごとのTTL目安・能動発話制御の詳細は `llm-conversation-design.md` を参照。
 
 ---
 

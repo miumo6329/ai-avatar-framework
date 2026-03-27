@@ -154,13 +154,13 @@ UPMパッケージとして提供。アバターのUnityプロジェクトから
     ▼
 VAD(音声区間検出)
     ├─ 発話中 + 節区切り検出 → STTが stt.clause 発行
-    │                         → MemoryWorkerがRAG先行検索（パイプライン並列化）
     │                         → ReactionWorker（軽量モデルで相槌・表情判定）
     │
     ├─ 短い間(pause)          → vad.pause発行（節区切り検出の補助）
     │
     └─ 発話終了               → stt.final発行
-                               → LLMに完全テキスト送信（RAG結果は先行検索済み）
+                               → MemoryWorkerがRAG検索開始（コンテキスト構築と並列実行）
+                               → LLMに完全テキスト送信（RAG結果を待って注入）
                                → LLMがストリーミング応答開始
                                → TTS逐次変換 → 音声出力開始
                                → ReactionWorkerが応答チャンクから表情・アニメーション判定
@@ -183,91 +183,14 @@ VAD(音声区間検出)
 | 項目 | 内容 |
 |------|------|
 | 人格定義 | personality.yaml にシステムプロンプト等を記述 |
-| 声設定 | tts.yaml にTTSエンジン種別と設定を記述（後述） |
-| 音声認識設定 | stt.yaml にSTTエンジン種別と設定を記述（後述） |
+| 声設定 | tts.yaml にTTSエンジン種別と設定を記述（詳細は `components.md` TTSWorker節） |
+| 音声認識設定 | stt.yaml にSTTエンジン種別と設定を記述（詳細は `components.md` STTWorker節） |
 | 記憶データ | data/ 配下にRAG DB実体を保持 |
 | 3Dモデル | Unityプロジェクト内に配置 |
 | 表情実装 | IExpressionHandler を3Dモデルに合わせて実装 |
 | アニメーション実装 | IAnimationHandler を3Dモデルに合わせて実装 |
 | カスタムスキル | skills/ にPythonスクリプトとして追加 |
 
-## tts.yaml と TTSアダプター
+## tts.yaml / stt.yaml とアダプター設計
 
-tts.yaml はTTSエンジンの種別と固有設定を記述する。
-
-```yaml
-tts:
-  engine: "voicevox"          # TTSエンジン種別
-
-  voicevox:
-    host: "localhost"
-    port: 50021
-    speaker_id: 3
-    speed_scale: 1.0
-    pitch_scale: 0.0
-
-  google:
-    language_code: "ja-JP"
-    voice_name: "ja-JP-Neural2-B"
-    speaking_rate: 1.0
-```
-
-### TTSアダプター設計
-
-TTSエンジンごとに能力（感情パラメータ、音素情報の有無等）が大きく異なるため、
-共通インターフェースは最小限（テキスト→音声バイナリ）とし、エンジン固有の設定はYAML側に閉じ込める。
-
-```
-TTSWorker
-  └── TTSAdapter (共通インターフェース: text → audio bytes)
-        ├── VoicevoxAdapter
-        ├── GoogleTTSAdapter
-        └── ...（将来追加）
-```
-
-エンジン選択は `tts.yaml` の `tts.engine` 値で決定される。
-
-## stt.yaml と STTアダプター
-
-stt.yaml はSTTエンジンの種別と固有設定を記述する。
-
-```yaml
-stt:
-  engine: "whisper"
-
-  whisper:
-    model: "large-v3"
-    language: "ja"
-    api_url: "http://localhost:9000"
-
-  google:
-    language_code: "ja-JP"
-    model: "latest_long"
-```
-
-### STTアダプター設計
-
-STTエンジンには一括変換型（Whisper）とストリーミング型（Google STT等）があり、
-VADの責務やstt.partialの可否が異なる。この差異はSTTAdapter内部で吸収する。
-
-ListenerWorkerは常に音声チャンクをSTTWorkerに送るだけとし、
-バッファリング・VAD・API呼び出しの違いはアダプター内部に閉じ込める。
-
-```
-ListenerWorker (音声チャンクを送るだけ)
-    │
-    ▼
-STTWorker
-  └── STTAdapter (共通インターフェース: audio chunk → callback(text, is_final))
-        ├── WhisperAdapter ─── 内部でバッファリング+VAD → 発話区間を一括変換
-        │                       stt.partial は発行しない
-        └── GoogleSTTAdapter ── チャンクをそのままStreaming APIに転送
-                                stt.partial / stt.final をリアルタイム発行
-```
-
-| エンジン種別 | VAD | stt.partial | stt.final |
-|------------|-----|-------------|-----------|
-| 一括型（Whisper） | アダプター内部で実行 | 非対応 | 発話区間ごとに発行 |
-| ストリーミング型（Google等） | API側で処理 | リアルタイム発行 | リアルタイム発行 |
-
-エンジン選択は `stt.yaml` の `stt.engine` 値で決定される。
+TTS・STTエンジンの設定ファイル形式とアダプター設計の詳細は `components.md`（TTSWorker・STTWorkerの各節）を参照。
