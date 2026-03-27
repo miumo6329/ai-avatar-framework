@@ -82,6 +82,7 @@ engine.run()
 - `perception.update` / `perception.trigger` - 知覚情報
 - `turn.interrupt` / `turn.cancel` / `tts.stop` - 割り込み制御
 - `memory.context` - RAG検索結果
+- `worker.status` - Worker稼働状態変化通知（READY / DEGRADED / DOWN）
 
 ### ConversationManager
 

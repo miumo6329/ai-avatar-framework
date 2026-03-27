@@ -66,6 +66,7 @@ class EventBus:
 | turn.interrupt | ConversationManager | LLMWorker, TTSWorker | 現在の応答を中断 |
 | turn.cancel | LLMWorker | TTSWorker | LLM応答ストリームの停止 |
 | memory.context | MemoryWorker | LLMWorker | RAG検索結果 |
+| worker.status | 各Worker (BaseWorker) | Engine, WebSocketServer | WorkerStatus（稼働状態変化通知） |
 
 ---
 
@@ -77,6 +78,7 @@ class EventBus:
 - ライフサイクル管理（start / stop）
 - EventBusへの接続
 - エラーハンドリング
+- 稼働状態管理（READY / DEGRADED / DOWN）と `worker.status` イベント発行
 
 ```python
 class BaseWorker:
@@ -84,7 +86,10 @@ class BaseWorker:
     async def start(self) -> None: ...
     async def stop(self) -> None: ...
     async def on_event(self, event_type: str, data: Any) -> None: ...
+    async def reset(self) -> None: ...  # 内部状態クリア、READY復帰
 ```
+
+稼働状態とタイムアウト・リトライの詳細は `timeout-resilience-design.md` を参照。
 
 ---
 
