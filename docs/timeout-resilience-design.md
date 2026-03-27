@@ -73,7 +73,7 @@ timeouts:
     inference_timeout: 1000       # ローカル軽量モデル推論(ms)
 
   vision:
-    inference_timeout: 5000       # VLM推論(ms) SmolVLM等の軽量モデル前提
+    inference_timeout: 5000       # 軽量なVLMモデル前提
 ```
 
 ### LLMWorkerのタイムアウト詳細
