@@ -22,6 +22,7 @@
 - [プロトコル仕様](docs/protocol.md) - WebSocketメッセージ定義
 - [コンポーネント詳細](docs/components.md) - 各Worker・Adapterの責務
 - [会話制御設計](docs/llm-conversation-design.md) - ターンテイキング・コンテキスト構築・割り込み処理
+- [STT音声認識処理設計](docs/stt-processing-design.md) - VAD・認識パイプライン・節区切り検出・アダプター設計
 - [TTS音声バッファリング設計](docs/tts-buffering-design.md) - テキスト分割・合成キュー・先読み方式
 - [タイムアウト・障害復旧設計](docs/timeout-resilience-design.md) - タイムアウト仕様・リトライ・Worker稼働状態管理
 

@@ -73,8 +73,7 @@ engine.run()
 コンポーネント間の非同期イベント配信。asyncioベース。
 
 主要イベント:
-- `audio.input` - 音声入力データ受信
-- `vad.speech_start` / `vad.speech_end` / `vad.pause` - 音声区間検出
+- `audio.input` - 発話音声チャンク受信（VAD済み、is_speech_start / is_speech_end フラグ付き）
 - `stt.partial` / `stt.clause` / `stt.final` - 音声認識結果
 - `llm.response_chunk` / `llm.response_done` - LLM応答（ストリーミング）
 - `reaction.expression` / `reaction.animation` / `reaction.backchannel` - 表情・アニメーション・相槌指示（ReactionWorker）
@@ -104,7 +103,6 @@ engine.run()
 
 | Worker | 種別 | 役割 |
 |--------|------|------|
-| ListenerWorker | Permanent | 常時音声ストリーミング受信、VAD（発話開始/終了/pause検出） |
 | STTWorker | Permanent | 音声→テキスト変換（STTアダプター経由、partial/clause/final発行） |
 | LLMWorker | Permanent | LLM呼び出し（ストリーミング応答、テキスト生成のみ） |
 | ReactionWorker | Permanent | 軽量ローカルモデルによる表情・アニメーション判定（常時テキストを受け取り推論） |
@@ -149,16 +147,14 @@ UPMパッケージとして提供。アバターのUnityプロジェクトから
 意味のある区切り（節区切り）をトリガーとする。詳細は `llm-conversation-design.md` を参照。
 
 ```
-音声入力(常時ストリーミング)
-    │
+音声入力（Adapter側VADで発話区間のみ送信）
+    │ audio.input (is_speech_start / is_speech_end)
     ▼
-VAD(音声区間検出)
+STTWorker（音声→テキスト変換）
     ├─ 発話中 + 節区切り検出 → STTが stt.clause 発行
     │                         → ReactionWorker（軽量モデルで相槌・表情判定）
     │
-    ├─ 短い間(pause)          → vad.pause発行（節区切り検出の補助）
-    │
-    └─ 発話終了               → stt.final発行
+    └─ 発話終了(is_speech_end)→ stt.final発行
                                → MemoryWorkerがRAG検索開始（コンテキスト構築と並列実行）
                                → LLMに完全テキスト送信（RAG結果を待って注入）
                                → LLMがストリーミング応答開始

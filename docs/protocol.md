@@ -89,7 +89,7 @@ Coreの準備完了を通知。
 
 #### `audio.input`
 
-マイクからの音声データストリーム。一定間隔（例: 100ms）で連続送信。
+Adapter側のVADで発話区間と判定された音声チャンク。**発話区間のみ送信**し、無音区間は送信しない。
 
 ```json
 {
@@ -99,10 +99,19 @@ Coreの準備完了を通知。
     "data": "base64-encoded-audio-chunk",
     "format": "pcm_16bit",
     "sample_rate": 16000,
-    "channels": 1
+    "channels": 1,
+    "is_speech_start": true,
+    "is_speech_end": false
   }
 }
 ```
+
+| フラグ | 省略時 | 説明 |
+|-------|-------|------|
+| `is_speech_start` | false | 発話区間の最初のチャンク。CoreのConversationManagerが割り込み検出に使用 |
+| `is_speech_end` | false | 発話区間の最後のチャンク。一括変換型STT（Whisper等）の変換トリガー |
+
+> VAD（発話区間検出）はAdapter側の責務。詳細は `stt-processing-design.md` を参照。
 
 ### 音声認識 (Core → Adapter)
 
@@ -271,8 +280,7 @@ LLM応答完了。
   "type": "state.update",
   "timestamp": 1234567890.123,
   "payload": {
-    "conversation_state": "listening",
-    "vad_state": "speech_detected"
+    "conversation_state": "listening"
   }
 }
 ```
@@ -315,11 +323,12 @@ sequenceDiagram
 
   rect rgb(255, 243, 224)
     Note over Adapter, Core: 音声入力 → 認識
-    Adapter->>Core: audio.input (chunk 1)
-    Adapter->>Core: audio.input (chunk 2)
+    Note over Adapter: VADが発話開始検出
+    Adapter->>Core: audio.input (is_speech_start=true)
     Core->>Adapter: state.update (listening)
-    Adapter->>Core: audio.input (chunk 3)
-    Note over Core: VADが発話終了検出
+    Adapter->>Core: audio.input (chunk...)
+    Note over Adapter: VADが発話終了検出
+    Adapter->>Core: audio.input (is_speech_end=true)
   end
 
   rect rgb(232, 245, 233)
@@ -348,13 +357,16 @@ sequenceDiagram
 
   rect rgb(255, 243, 224)
     Note over Adapter, Core: ユーザー発話中 <br/>→ ReactionWorkerがリアクション判定
-    Adapter->>Core: audio.input (chunks...)
+    Note over Adapter: VADが発話開始検出
+    Adapter->>Core: audio.input (is_speech_start=true)
     Core->>Adapter: state.update (listening)
+    Adapter->>Core: audio.input (chunks...)
     Note over Core: stt.clause検出「今日さ、」→ ReactionWorker
     Core->>Adapter: expression.set (neutral, nod)
     Note over Core: stt.clause検出「仕事で嫌なことがあって、」<br/>→ ReactionWorker
     Core->>Adapter: expression.set (sad, 0.5)
-    Note over Core: VADが発話終了検出
+    Note over Adapter: VADが発話終了検出
+    Adapter->>Core: audio.input (is_speech_end=true)
   end
 
   rect rgb(232, 245, 233)
@@ -390,9 +402,9 @@ sequenceDiagram
 
   rect rgb(255, 230, 230)
     Note over Adapter, Core: ユーザー割り込み
-    Adapter->>Core: audio.input (user starts speaking)
-    Note over Core: vad.speech_start検出 + 300ms猶予
-    Note over Core: 猶予後もユーザー発話継続 <br/>→ 割り込み確定
+    Note over Adapter: VADが発話検出 + 300ms猶予後に割り込み確定
+    Adapter->>Core: audio.input (is_speech_start=true)
+    Note over Core: SPEAKING中に is_speech_start 受信 <br/>→ 割り込み確定
     Core->>Adapter: tts.stop
     Core->>Adapter: state.update (interrupted)
     Core->>Adapter: state.update (listening)
@@ -401,7 +413,8 @@ sequenceDiagram
   rect rgb(255, 243, 224)
     Note over Adapter, Core: ユーザーの新しい発話を処理
     Adapter->>Core: audio.input (chunks...)
-    Note over Core: VADが発話終了検出
+    Note over Adapter: VADが発話終了検出
+    Adapter->>Core: audio.input (is_speech_end=true)
     Core->>Adapter: stt.final
     Core->>Adapter: llm.thinking
     Note over Core: 会話履歴に中断された応答も含む
