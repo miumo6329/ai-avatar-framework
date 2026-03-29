@@ -1,0 +1,9 @@
+tts:
+  engine: "voicevox"
+
+  voicevox:
+    host: "localhost"
+    port: 50021
+    speaker_id: 1
+    speed_scale: 1.0
+    pitch_scale: 0.0

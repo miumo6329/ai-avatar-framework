@@ -1,0 +1,8 @@
+stt:
+  engine: "whisper"
+
+  whisper:
+    model: "small"
+    language: "ja"
+    device: "auto"        # "cpu" | "cuda" | "auto"
+    compute_type: "auto"  # "int8" | "float16" | "auto"

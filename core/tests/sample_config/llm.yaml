@@ -1,0 +1,5 @@
+llm:
+  model: "claude-sonnet-4-6"
+  temperature: 0.7
+  max_tokens: 1024
+  # api_key: ""  # 未設定の場合は ANTHROPIC_API_KEY 環境変数を使用
