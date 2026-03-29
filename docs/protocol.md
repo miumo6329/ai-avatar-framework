@@ -85,6 +85,11 @@ Coreの準備完了を通知。
 }
 ```
 
+#### `connection.disconnected` (内部イベント、Core内部のみ)
+
+WebSocket接続が切断されたことをEngineが検知し、EventBusに流す内部イベント。AdapterからのJSONメッセージではない。
+MemoryWorkerがこのイベントを購読し、残存する会話バッファの要約・保存を実行してセッションを終了する。
+
 ### 音声入力 (Adapter → Core)
 
 #### `audio.input`
