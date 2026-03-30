@@ -26,7 +26,7 @@ graph TB
       RAGEngine
       WebSocketServer
     end
-    subgraph adapter["Unity Adapter Base (UPMで提供)"]
+    subgraph bridge["Unity Bridge Base (UPMで提供)"]
       WebSocketClient
       MessageRouter
       IExpressionHandler
@@ -47,7 +47,7 @@ graph TB
   end
 
   core -- "uv add\n仕組みを提供" --> brain
-  adapter -- "UPM参照\nインターフェースを提供" --> unity
+  bridge -- "UPM参照\nインターフェースを提供" --> unity
   brain <--> |"WebSocket"| unity
 
   style framework fill:#e8f4f8,stroke:#2196F3
@@ -88,14 +88,14 @@ engine.run()
 会話の状態管理とイベント優先度判断を専任するコンポーネント。
 会話状態マシン（IDLE / LISTENING / PROCESSING / SPEAKING / INTERRUPTED）を管理し、
 割り込み制御やイベント優先度に基づく判断を行う。
-詳細は `llm-conversation-design.md` を参照。
+詳細は [llm-conversation-design.md](llm-conversation-design.md) を参照。
 
 ### PerceptionManager
 
 全センサー（視覚・触覚・距離等）の最新状態を集約・保持するコンポーネント。
 各センサーWorkerが `perception.update` で知覚を登録し、LLMWorkerがコンテキスト構築時に `get_snapshot()` で最新状態を取得する（push/pull非対称パターン）。
 新しいセンサー追加時にLLMWorkerの修正が不要な拡張性を持つ。
-詳細は `llm-conversation-design.md` を参照。
+詳細は [llm-conversation-design.md](llm-conversation-design.md) を参照。
 
 ### Workers
 
@@ -125,7 +125,7 @@ engine.run()
 
 Unity/ROS2アダプターとの通信層。JSONメッセージでやり取り。
 
-## Unity Adapter Base
+## Unity Bridge Base
 
 UPMパッケージとして提供。アバターのUnityプロジェクトから参照される。
 
@@ -144,10 +144,10 @@ UPMパッケージとして提供。アバターのUnityプロジェクトから
 ## リアルタイム応答フロー
 
 イベント駆動 + パイプライン並列化方式を採用。固定間隔ポーリングではなく、
-意味のある区切り（節区切り）をトリガーとする。詳細は `llm-conversation-design.md` を参照。
+意味のある区切り（節区切り）をトリガーとする。詳細は [llm-conversation-design.md](llm-conversation-design.md) を参照。
 
 ```
-音声入力（Adapter側VADで発話区間のみ送信）
+音声入力（Unity Bridge側VADで発話区間のみ送信）
     │ audio.input (is_speech_start / is_speech_end)
     ▼
 STTWorker（音声→テキスト変換）
@@ -171,16 +171,16 @@ STTWorker（音声→テキスト変換）
 | コンポーネント | 提供方法 | 利用方法 |
 |-------------|---------|---------|
 | Python Core | uv add | `from ai_avatar import Engine` |
-| Unity Adapter Base | UPM (git URL) | Packages/manifest.json で参照 |
-| ROS2 Adapter | 将来対応 | - |
+| Unity Bridge Base | UPM (git URL) | Packages/manifest.json で参照 |
+| ROS2 Bridge | 将来対応 | - |
 
 ## アバタープロジェクト側の責務
 
 | 項目 | 内容 |
 |------|------|
 | 人格定義 | personality.yaml にシステムプロンプト等を記述 |
-| 声設定 | tts.yaml にTTSエンジン種別と設定を記述（詳細は `components.md` TTSWorker節） |
-| 音声認識設定 | stt.yaml にSTTエンジン種別と設定を記述（詳細は `components.md` STTWorker節） |
+| 声設定 | tts.yaml にTTSエンジン種別と設定を記述（詳細は [components.md](components.md) TTSWorker節） |
+| 音声認識設定 | stt.yaml にSTTエンジン種別と設定を記述（詳細は [components.md](components.md) STTWorker節） |
 | 記憶データ | data/ 配下にRAG DB実体を保持 |
 | 3Dモデル | Unityプロジェクト内に配置 |
 | 表情実装 | IExpressionHandler を3Dモデルに合わせて実装 |
@@ -189,4 +189,4 @@ STTWorker（音声→テキスト変換）
 
 ## tts.yaml / stt.yaml とアダプター設計
 
-TTS・STTエンジンの設定ファイル形式とアダプター設計の詳細は `components.md`（TTSWorker・STTWorkerの各節）を参照。
+TTS・STTエンジンの設定ファイル形式とアダプター設計の詳細は [components.md](components.md)（TTSWorker・STTWorkerの各節）を参照。

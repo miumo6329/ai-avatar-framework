@@ -150,7 +150,7 @@ classDiagram
     class LLMWorker {
         -_personality: dict
         -_cm: ConversationManager
-        -_client: AsyncAnthropic
+        -_adapter: LLMAdapter
         -_history: list[dict]
         -_rag_context: str
         -_current_task: Task
@@ -158,8 +158,24 @@ classDiagram
         +teardown() None
         #_handle(event_type, data) None
         -_respond(user_text) None
+        -_on_chunk(text) None
         -_build_system_prompt() str
         -_build_messages(current_input) list
+    }
+
+    class LLMAdapter {
+        <<abstract>>
+        +setup() None
+        +stream_reply(system_prompt, messages, on_chunk) tuple
+        +teardown() None
+    }
+
+    class AnthropicAdapter {
+        -_config: dict
+        -_client: AsyncAnthropic
+        +setup() None
+        +stream_reply(system_prompt, messages, on_chunk) tuple
+        +teardown() None
     }
 
     %% ── TTS ──────────────────────────────────────────────────────
@@ -219,7 +235,9 @@ classDiagram
     WhisperAdapter --|> STTAdapter
 
     LLMWorker --|> BaseWorker
+    LLMWorker *-- LLMAdapter
     LLMWorker --> ConversationManager : pending_utterance\naccumulate_utterance
+    AnthropicAdapter --|> LLMAdapter
 
     TTSWorker --|> BaseWorker
     TTSWorker *-- TTSAdapter
@@ -230,7 +248,7 @@ classDiagram
 
 ```mermaid
 sequenceDiagram
-    participant A as Adapter (test_client)
+    participant A as Unity Bridge (test_client)
     participant WS as WebSocketServer
     participant CM as ConversationManager
     participant STT as STTWorker

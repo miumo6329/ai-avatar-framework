@@ -11,7 +11,7 @@ from ai_avatar.config import Config
 from ai_avatar.conversation_manager import ConversationManager
 from ai_avatar.event_bus import EventBus
 from ai_avatar.server.websocket import WebSocketServer
-from ai_avatar.workers.llm import LLMWorker
+from ai_avatar.workers.llm import AnthropicAdapter, LLMWorker
 from ai_avatar.workers.stt import STTWorker, WhisperAdapter
 from ai_avatar.workers.tts import TTSWorker, VoicevoxAdapter
 
@@ -121,7 +121,15 @@ class Engine:
         assert self._config and self._bus and self._cm
         llm_config = self._config.get("llm", {})
         personality = self._config.get("personality", {})
-        return LLMWorker(self._bus, llm_config, personality, self._cm)
+        engine = llm_config.get("engine", "anthropic")
+
+        if engine == "anthropic":
+            anthropic_config = llm_config.get("anthropic", {})
+            adapter = AnthropicAdapter(anthropic_config)
+        else:
+            raise ValueError(f"Unsupported LLM engine: {engine}")
+
+        return LLMWorker(self._bus, llm_config, personality, self._cm, adapter)
 
     def _build_tts_worker(self) -> TTSWorker:
         assert self._config and self._bus

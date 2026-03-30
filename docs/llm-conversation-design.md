@@ -181,7 +181,7 @@ class ReactionResult:
     backchannel: str | None   # "うん", "へぇ", None（userの発話中のみ）
 ```
 
-選択肢はAdapter Capabilities（connection.helloで受信した表情・アニメーション一覧）から選択する。
+選択肢はBridge Capabilities（connection.helloで受信した表情・アニメーション一覧）から選択する。
 
 #### 軽量モデルの選定方針
 
@@ -255,10 +255,10 @@ sequenceDiagram
     participant CM as ConversationMgr
     participant LLM as LLMWorker
     participant TTS as TTSWorker
-    participant Adapter
+    participant Bridge
 
-    Note over TTS, Adapter: 状態: SPEAKING
-    TTS ->> Adapter: tts.audio「今日はいい天気...」
+    Note over TTS, Bridge: 状態: SPEAKING
+    TTS ->> Bridge: tts.audio「今日はいい天気...」
 
     User ->> Listener: 「ちょっと待って」(音声)
     Listener ->> CM: vad.speech_start
@@ -266,10 +266,10 @@ sequenceDiagram
     Note over CM: 猶予経過、発話継続 → 割り込み確定
 
     rect rgb(255, 230, 230)
-        Note over CM, Adapter: 状態: INTERRUPTED（瞬間的）
+        Note over CM, Bridge: 状態: INTERRUPTED（瞬間的）
         CM ->> LLM: ① turn.interrupt<br/>APIリクエストをキャンセル
         CM ->> TTS: ② tts.stop<br/>キュー内の未再生チャンクを破棄
-        TTS ->> Adapter: tts.stop（音声停止）
+        TTS ->> Bridge: tts.stop（音声停止）
         Note over CM: ③ 中断された応答を会話履歴に記録<br/>「今日はいい天気（中断）」
     end
 

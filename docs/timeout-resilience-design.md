@@ -174,7 +174,7 @@ class WorkerStatus:
 `worker.status` イベントはEventBus経由で配信される。以下から購読可能:
 
 - **テスト用GUI** — 各Workerの状態をリアルタイム表示
-- **WebSocketServer** — Adapter側（Unity）に通知を転送
+- **WebSocketServer** — Unity Bridge側に通知を転送
 - **Engine** — 全Workerの稼働状態を集約して保持
 
 ---

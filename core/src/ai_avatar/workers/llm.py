@@ -1,9 +1,11 @@
 """LLMWorker: LLM呼び出しとストリーミング応答管理"""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-from typing import Any
+from abc import ABC, abstractmethod
+from typing import Any, Callable, Coroutine
 
 from ai_avatar.conversation_manager import ConversationManager
 from ai_avatar.event_bus import EventBus
@@ -11,9 +13,44 @@ from ai_avatar.workers.base import BaseWorker
 
 logger = logging.getLogger(__name__)
 
+OnChunk = Callable[[str], Coroutine[Any, Any, None]]
+
+
+# ── LLMAdapter ────────────────────────────────────────────────────────────────
+
+class LLMAdapter(ABC):
+    """LLMエンジンの共通インターフェース。
+
+    エンジン種別（Anthropic / OpenAI / Ollama等）の差異をここで吸収し、
+    LLMWorkerに対して統一インターフェースを提供する。
+    """
+
+    @abstractmethod
+    async def setup(self) -> None:
+        """クライアント初期化"""
+
+    @abstractmethod
+    async def stream_reply(
+        self,
+        system_prompt: str,
+        messages: list[dict[str, Any]],
+        on_chunk: OnChunk,
+    ) -> tuple[str, str]:
+        """ストリーミング応答を実行し (action, full_text) を返す。
+
+        on_chunk はテキスト増分を受け取るコールバック。
+        action は "respond" または "wait"。
+        """
+
+    @abstractmethod
+    async def teardown(self) -> None:
+        """リソース解放"""
+
+
+# ── LLMWorker ────────────────────────────────────────────────────────────────
 
 class LLMWorker(BaseWorker):
-    """LLMWorker（Claude Sonnet / Anthropic API）。
+    """LLMWorker。
 
     購読するイベント:
     - stt.final        → コンテキスト構築 → LLM APIリクエスト
@@ -31,19 +68,18 @@ class LLMWorker(BaseWorker):
         config: dict[str, Any],
         personality: dict[str, Any],
         conversation_manager: ConversationManager,
+        adapter: LLMAdapter,
     ) -> None:
         super().__init__(event_bus, config)
         self._personality = personality
         self._cm = conversation_manager
-        self._client: Any = None
+        self._adapter = adapter
         self._current_task: Any = None
         self._history: list[dict[str, str]] = []
         self._rag_context: str | None = None
 
     async def setup(self) -> None:
-        import anthropic
-        api_key = self._config.get("api_key")
-        self._client = anthropic.AsyncAnthropic(api_key=api_key) if api_key else anthropic.AsyncAnthropic()
+        await self._adapter.setup()
         self.subscribe("stt.final")
         self.subscribe("memory.context")
         self.subscribe("turn.interrupt")
@@ -52,12 +88,12 @@ class LLMWorker(BaseWorker):
     async def teardown(self) -> None:
         if self._current_task and not self._current_task.done():
             self._current_task.cancel()
+        await self._adapter.teardown()
 
     async def _handle(self, event_type: str, data: Any) -> None:
         if event_type == "stt.final":
             text = data.get("text", "")
             if text:
-                import asyncio
                 self._current_task = asyncio.create_task(
                     self._respond(text), name="llm-respond"
                 )
@@ -71,49 +107,17 @@ class LLMWorker(BaseWorker):
     # ── 応答生成 ──────────────────────────────────────────────────
 
     async def _respond(self, user_text: str) -> None:
-        import asyncio
-
-        # 蓄積発話 + 今回の発話を結合
         accumulated = self._cm.pending_utterance + [user_text]
         full_input = "".join(accumulated)
 
         messages = self._build_messages(full_input)
         system_prompt = self._build_system_prompt()
         logger.debug("[LLMWorker] system_prompt:\n%s", system_prompt)
-        model = self._config.get("model", "claude-sonnet-4-6")
-        temperature = self._config.get("temperature", 0.7)
-        max_tokens = self._config.get("max_tokens", 1024)
-
-        tool = self._reply_tool()
-        collected_text = ""
 
         try:
-            async with self._client.messages.stream(
-                model=model,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                system=system_prompt,
-                messages=messages,
-                tools=[tool],
-                tool_choice={"type": "tool", "name": "reply"},
-            ) as stream:
-                partial_json = ""
-                last_sent_len = 0
-
-                async for event in stream:
-                    if event.type == "content_block_delta":
-                        delta = event.delta
-                        if delta.type == "input_json_delta":
-                            partial_json += delta.partial_json
-                            new_text = _extract_text_delta(partial_json, last_sent_len)
-                            if new_text:
-                                last_sent_len += len(new_text)
-                                collected_text += new_text
-                                await self._bus.publish("llm.response_chunk", {"text": new_text})
-
-                # 完全なJSON確定後にactionを確認
-                final_msg = await stream.get_final_message()
-
+            action, response_text = await self._adapter.stream_reply(
+                system_prompt, messages, self._on_chunk
+            )
         except asyncio.CancelledError:
             return
         except Exception:
@@ -121,23 +125,21 @@ class LLMWorker(BaseWorker):
             self._set_status_degraded()
             return
 
-        # tool_useブロックからactionとtextを取得
-        action, response_text = _parse_reply(final_msg)
         logger.info("[LLMWorker] action=%s text=%r", action, response_text[:50] if response_text else "")
 
         if action == "wait":
-            # 発話が途中 → pending_utteranceに蓄積
             self._cm.accumulate_utterance(user_text)
             await self._bus.publish("llm.response_done", {"text": "", "action": "wait"})
             return
 
-        # action == "respond"
-        # 会話履歴に追加
         self._history.append({"role": "user", "content": full_input})
         self._history.append({"role": "assistant", "content": response_text})
         self._rag_context = None
 
         await self._bus.publish("llm.response_done", {"text": response_text, "action": "respond"})
+
+    async def _on_chunk(self, text: str) -> None:
+        await self._bus.publish("llm.response_chunk", {"text": text})
 
     # ── プロンプト構築 ────────────────────────────────────────────
 
@@ -167,11 +169,9 @@ class LLMWorker(BaseWorker):
     def _build_messages(self, current_input: str) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = []
 
-        # 会話履歴
         for turn in self._history:
             messages.append({"role": turn["role"], "content": turn["content"]})
 
-        # 現在のユーザー入力（RAGコンテキストがあれば付与）
         user_content = ""
         if self._rag_context:
             user_content += f"## 関連する過去の記憶\n{self._rag_context}\n\n"
@@ -179,6 +179,71 @@ class LLMWorker(BaseWorker):
         messages.append({"role": "user", "content": user_content})
 
         return messages
+
+    def _set_status_degraded(self) -> None:
+        from ai_avatar.workers.base import WorkerStatus
+        self._set_status(WorkerStatus.DEGRADED)
+
+
+# ── AnthropicAdapter ──────────────────────────────────────────────────────────
+
+class AnthropicAdapter(LLMAdapter):
+    """Anthropic API（Claude）を使ったLLMAdapter。"""
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        self._config = config
+        self._client: Any = None
+
+    async def setup(self) -> None:
+        import anthropic
+        api_key = self._config.get("api_key")
+        self._client = (
+            anthropic.AsyncAnthropic(api_key=api_key) if api_key
+            else anthropic.AsyncAnthropic()
+        )
+
+    async def stream_reply(
+        self,
+        system_prompt: str,
+        messages: list[dict[str, Any]],
+        on_chunk: OnChunk,
+    ) -> tuple[str, str]:
+        model = self._config.get("model", "claude-sonnet-4-6")
+        temperature = self._config.get("temperature", 0.7)
+        max_tokens = self._config.get("max_tokens", 1024)
+
+        tool = self._reply_tool()
+        collected_text = ""
+        partial_json = ""
+        last_sent_len = 0
+
+        async with self._client.messages.stream(
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system=system_prompt,
+            messages=messages,
+            tools=[tool],
+            tool_choice={"type": "tool", "name": "reply"},
+        ) as stream:
+            async for event in stream:
+                if event.type == "content_block_delta":
+                    delta = event.delta
+                    if delta.type == "input_json_delta":
+                        partial_json += delta.partial_json
+                        new_text = _extract_text_delta(partial_json, last_sent_len)
+                        if new_text:
+                            last_sent_len += len(new_text)
+                            collected_text += new_text
+                            await on_chunk(new_text)
+
+            final_msg = await stream.get_final_message()
+
+        action, response_text = _parse_reply(final_msg)
+        return action, response_text
+
+    async def teardown(self) -> None:
+        pass
 
     @staticmethod
     def _reply_tool() -> dict[str, Any]:
@@ -205,19 +270,11 @@ class LLMWorker(BaseWorker):
             },
         }
 
-    def _set_status_degraded(self) -> None:
-        from ai_avatar.workers.base import WorkerStatus
-        self._set_status(WorkerStatus.DEGRADED)
-
 
 # ── ユーティリティ ─────────────────────────────────────────────────────────────
 
 def _extract_text_delta(partial_json: str, already_sent: int) -> str:
-    """部分的なJSONから "text" フィールドの増分を抽出する。
-
-    例: '{"action": "respond", "text": "今日は' → "今日は"（の増分）
-    """
-    # "text": " の後の文字列を抽出する簡易パーサー
+    """部分的なJSONから "text" フィールドの増分を抽出する。"""
     marker = '"text":'
     idx = partial_json.find(marker)
     if idx == -1:
@@ -227,10 +284,7 @@ def _extract_text_delta(partial_json: str, already_sent: int) -> str:
     if not after_marker.startswith('"'):
         return ""
 
-    # 開き引用符の直後から文字列を取り出す
     content = after_marker[1:]
-    # エスケープされた引用符に注意しながら、閉じ引用符を探す
-    # 部分JSONなので閉じ引用符がない場合は現在のcontent全体が増分候補
     result = []
     i = 0
     while i < len(content):
@@ -243,7 +297,7 @@ def _extract_text_delta(partial_json: str, already_sent: int) -> str:
             else:
                 break
         elif c == '"':
-            break  # 閉じ引用符（完全なJSON）
+            break
         else:
             result.append(c)
             i += 1

@@ -42,11 +42,11 @@ ai-avatar-framework/
 │   └── tests/
 │       └── ...
 │
-├── adapters/
-│   └── unity-package/                 # Unity Adapter Base（UPMパッケージ）
+├── bridges/
+│   └── unity-package/                 # Unity Bridge Base（UPMパッケージ）
 │       ├── package.json               #   UPMパッケージ定義
 │       ├── Runtime/
-│       │   ├── AiAvatarAdapter.asmdef
+│       │   ├── AiAvatarBridge.asmdef
 │       │   ├── Connection/
 │       │   │   ├── WebSocketClient.cs
 │       │   │   └── MessageRouter.cs
@@ -99,7 +99,7 @@ avatar-foo/
 │   │       │   ├── FooExpressionHandler.cs   # IExpressionHandler実装
 │   │       │   ├── FooAnimationHandler.cs    # IAnimationHandler実装
 │   │       │   └── FooAudioHandler.cs        # IAudioHandler実装
-│   │       └── FooAvatarBridge.cs            # 各Handlerの組み立て
+│   │       └── FooUnityBridge.cs             # 各Handlerの組み立て
 │   ├── Packages/
 │   │   └── manifest.json             #   ← ai-avatar-framework UPM参照
 │   └── ProjectSettings/
@@ -132,7 +132,7 @@ RAGは「仕組み」と「データ」を分離する：
 
 ## UPMパッケージの参照方法
 
-アバターのUnityプロジェクトからフレームワークのUnity Adapter Baseを参照する方法。
+アバターのUnityプロジェクトからフレームワークのUnity Bridge Baseを参照する方法。
 開発フェーズに応じて3段階で運用する：
 
 ### Phase 1: 開発初期（ローカルパス参照）
@@ -143,7 +143,7 @@ RAGは「仕組み」と「データ」を分離する：
 // avatar-foo/unity/Packages/manifest.json
 {
   "dependencies": {
-    "com.yourname.ai-avatar-adapter": "file:../../../ai-avatar-framework/adapters/unity-package"
+    "com.yourname.ai-avatar-bridge": "file:../../../ai-avatar-framework/bridges/unity-package"
   }
 }
 ```
@@ -155,7 +155,7 @@ RAGは「仕組み」と「データ」を分離する：
 ```json
 {
   "dependencies": {
-    "com.yourname.ai-avatar-adapter": "https://github.com/yourname/ai-avatar-framework.git?path=adapters/unity-package#main"
+    "com.yourname.ai-avatar-bridge": "https://github.com/yourname/ai-avatar-framework.git?path=adapters/unity-package#main"
   }
 }
 ```
@@ -167,7 +167,7 @@ RAGは「仕組み」と「データ」を分離する：
 ```json
 {
   "dependencies": {
-    "com.yourname.ai-avatar-adapter": "https://github.com/yourname/ai-avatar-framework.git?path=adapters/unity-package#v1.2.0"
+    "com.yourname.ai-avatar-bridge": "https://github.com/yourname/ai-avatar-framework.git?path=adapters/unity-package#v1.2.0"
   }
 }
 ```

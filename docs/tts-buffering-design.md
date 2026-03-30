@@ -71,7 +71,7 @@ audio₃                                                         [====再生====
 1. **テキストバッファのクリア**: 未確定のテキストチャンクを破棄
 2. **合成キューのクリア**: 未送信の合成済み音声チャンクを破棄
 3. **合成中リクエストのキャンセル**: VOICEVOX APIへのHTTPリクエストのキャンセル可否はAPI仕様次第（実装時に調査）
-4. **Adapter側再生停止**: `tts.stop` WebSocketメッセージによりAdapter側の再生バッファもクリア（protocol.mdで既定済み）
+4. **Unity Bridge側再生停止**: `tts.stop` WebSocketメッセージによりUnity Bridge側の再生バッファもクリア（protocol.mdで既定済み）
 
 ---
 
@@ -87,7 +87,7 @@ LLM応答開始
   ↓ 最初の句読点検出 → sentence₁ 確定
   ↓ TTS合成開始（VOICEVOX API呼び出し）
   ↓ 合成完了 → tts.audio_chunk 送信
-  ↓ Adapter側で再生開始 ← ここまでが初回レイテンシ
+  ↓ Unity Bridge側で再生開始 ← ここまでが初回レイテンシ
 ```
 
 VOICEVOX一括合成の場合、部分合成（文が確定する前に合成開始）は不可能なため、
@@ -118,7 +118,7 @@ class TTSWorkerState:
     text_buffer: str                    # LLMチャンクの蓄積バッファ
     synthesis_queue: asyncio.Queue      # 合成待ちの文リスト
     current_synthesis: asyncio.Task     # 現在合成中のタスク（キャンセル用）
-    is_playing: bool                    # Adapter側で再生中かどうか
+    is_playing: bool                    # Unity Bridge側で再生中かどうか
 ```
 
 ### 状態遷移
